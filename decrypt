@@ -1,0 +1,59 @@
+import csv
+import aiohttp
+import asyncio
+import json
+
+# Define the concurrency limit
+CONCURRENCY_LIMIT = 10
+
+# Asynchronous function to send a request and process the response
+async def fetch_and_process(session, row, semaphore, writer, semaphore_write):
+    envelope = row[1]  # Extract envelope value
+    url = f'http://localhost:5000/v2/map?env={envelope}'
+    async with semaphore:  # Limit concurrency for requests
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    for item in result:
+                        if item.get("source") == "uidapi.com":
+                            uid_list = list(item["mapping"].values())
+                            if uid_list:
+                                # Add the UID to the current row
+                                row.append(uid_list[0])
+                                break
+                else:
+                    print(f"Error: {response.status} for envelope {envelope}")
+        except Exception as e:
+            print(f"Error processing envelope {envelope}: {e}")
+
+    # Write the updated row to the output file
+    async with semaphore_write:
+        writer.writerow(row)
+
+# Main asynchronous function
+async def main():
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)  # Limit concurrency for requests
+    semaphore_write = asyncio.Semaphore(1)  # Ensure only one task writes to the file at a time
+
+    # Open input and output CSV files
+    with open('samsung_sample_envelopes.csv', 'r') as infile, open('updated_samsung_envelopes.csv', 'w', newline='') as outfile:
+        csv_reader = csv.reader(infile)
+        csv_writer = csv.writer(outfile)
+
+        # Read the header and write it to the output file, adding a new column for the UID
+        header = next(csv_reader)
+        header.append("UID")  # Add a new column for the UID
+        csv_writer.writerow(header)
+
+        # Process envelopes asynchronously
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                fetch_and_process(session, row, semaphore, csv_writer, semaphore_write)
+                for row in csv_reader
+            ]
+            await asyncio.gather(*tasks)  # Run tasks with concurrency limit
+
+# Run the asynchronous main function
+if __name__ == "__main__":
+    asyncio.run(main())
